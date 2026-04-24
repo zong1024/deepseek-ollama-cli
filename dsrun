@@ -30,6 +30,14 @@ except Exception:  # pragma: no cover - readline is optional on some systems.
 APP_NAME = "dsrun"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+MODEL_ALIASES = {
+    "flash": "deepseek-v4-flash",
+    "v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "pro": "deepseek-v4-pro",
+    "v4-pro": "deepseek-v4-pro",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+}
 SUPPORTED_THINKING = {"enabled", "disabled"}
 SUPPORTED_EFFORT = {"high", "max"}
 
@@ -142,6 +150,13 @@ def parse_bool(value: str) -> bool:
     if lowered in {"0", "false", "no", "off", "disabled"}:
         return False
     raise CliError(f"无法识别布尔值: {value}")
+
+
+def resolve_model_name(value: str) -> str:
+    model = value.strip()
+    if not model:
+        raise CliError("模型名不能为空")
+    return MODEL_ALIASES.get(model.lower(), model)
 
 
 def parse_optional_int(value: str) -> Optional[int]:
@@ -320,7 +335,7 @@ def help_text() -> str:
           /bye or /exit               Exit
           /clear or /reset            Clear conversation context
           /show                       Show current model, settings and context size
-          /set model <name>           Set model, e.g. deepseek-v4-flash
+          /model [name]               Show or set model; aliases: flash, pro
           /set system <text>          Set system prompt
           /set thinking enabled|disabled
           /set effort high|max        Set reasoning effort when thinking is enabled
@@ -366,7 +381,7 @@ def handle_set(state: ChatState, args: List[str]) -> None:
     settings = state.settings
 
     if name == "model":
-        settings.model = value.strip()
+        settings.model = resolve_model_name(value)
     elif name == "system":
         settings.system = value
     elif name == "thinking":
@@ -392,6 +407,16 @@ def handle_set(state: ChatState, args: List[str]) -> None:
     else:
         raise CliError(f"未知设置项: {name}")
     print(f"set {name}")
+
+
+def handle_model(state: ChatState, args: List[str]) -> None:
+    if not args:
+        print(state.settings.model)
+        return
+    if len(args) != 1:
+        raise CliError("用法: /model [flash|pro|model-name]")
+    state.settings.model = resolve_model_name(args[0])
+    print(f"model {state.settings.model}")
 
 
 def save_session(state: ChatState, name: str) -> None:
@@ -448,6 +473,8 @@ def handle_command(state: ChatState, line: str, last_usage: Optional[Dict[str, A
         print("context cleared")
     elif command == "show":
         show_state(state, last_usage)
+    elif command == "model":
+        handle_model(state, args)
     elif command == "set":
         handle_set(state, args)
     elif command == "save":

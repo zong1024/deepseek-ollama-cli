@@ -47,6 +47,18 @@ dsrun "用三句话解释 Linux epoll"
 dsrun --model deepseek-v4-pro
 ```
 
+进入交互后也可以切换：
+
+```text
+>>> /model pro
+```
+
+切回 Flash：
+
+```text
+>>> /model flash
+```
+
 关闭 thinking 模式：
 
 ```sh
@@ -66,7 +78,7 @@ dsrun --show-thinking
 /bye or /exit               退出
 /clear or /reset            清空当前上下文
 /show                       显示当前设置
-/set model <name>           设置模型
+/model [name]               显示或设置模型，支持 flash、pro
 /set system <text>          设置 system prompt
 /set thinking enabled|disabled
 /set effort high|max
