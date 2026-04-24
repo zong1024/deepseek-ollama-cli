@@ -47,6 +47,13 @@ dsrun "用三句话解释 Linux epoll"
 dsrun --model deepseek-v4-pro
 ```
 
+也可以用短别名：
+
+```sh
+dsrun --model pro
+dsrun --model flash
+```
+
 进入交互后也可以切换：
 
 ```text
@@ -104,7 +111,7 @@ dsrun --show-thinking
 
 - `DEEPSEEK_API_KEY`：API key
 - `DEEPSEEK_BASE_URL`：默认 `https://api.deepseek.com`
-- `DEEPSEEK_MODEL`：默认 `deepseek-v4-flash`
+- `DEEPSEEK_MODEL`：默认 `deepseek-v4-flash`，也支持 `flash`、`pro`
 - `DEEPSEEK_SYSTEM`：默认 system prompt
 - `DEEPSEEK_THINKING`：`enabled` 或 `disabled`
 - `DEEPSEEK_REASONING_EFFORT`：`high` 或 `max`

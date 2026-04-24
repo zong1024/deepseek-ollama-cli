@@ -32,10 +32,14 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 MODEL_ALIASES = {
     "flash": "deepseek-v4-flash",
+    "v4 flash": "deepseek-v4-flash",
     "v4-flash": "deepseek-v4-flash",
+    "deepseek v4 flash": "deepseek-v4-flash",
     "deepseek-v4-flash": "deepseek-v4-flash",
     "pro": "deepseek-v4-pro",
+    "v4 pro": "deepseek-v4-pro",
     "v4-pro": "deepseek-v4-pro",
+    "deepseek v4 pro": "deepseek-v4-pro",
     "deepseek-v4-pro": "deepseek-v4-pro",
 }
 SUPPORTED_THINKING = {"enabled", "disabled"}
@@ -156,7 +160,9 @@ def resolve_model_name(value: str) -> str:
     model = value.strip()
     if not model:
         raise CliError("模型名不能为空")
-    return MODEL_ALIASES.get(model.lower(), model)
+    lowered = model.lower()
+    normalized = re.sub(r"[\s_]+", "-", lowered)
+    return MODEL_ALIASES.get(lowered, MODEL_ALIASES.get(normalized, model))
 
 
 def parse_optional_int(value: str) -> Optional[int]:
@@ -606,7 +612,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     settings = Settings(
         base_url=args.base_url,
-        model=args.model,
+        model=resolve_model_name(args.model),
         system=args.system,
         thinking=args.thinking,
         reasoning_effort=args.reasoning_effort,
