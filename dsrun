@@ -15,6 +15,7 @@ import re
 import shlex
 import sys
 import textwrap
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ MODEL_ALIASES = {
 }
 SUPPORTED_THINKING = {"enabled", "disabled"}
 SUPPORTED_EFFORT = {"high", "max"}
+SUPPORTED_THINKING_OUTPUT = {"status", "hidden", "raw"}
 
 
 class CliError(Exception):
@@ -66,6 +68,7 @@ class Settings:
     top_p: Optional[float] = None
     timeout: int = 300
     show_thinking: bool = False
+    thinking_output: str = "status"
     color: bool = True
 
 
@@ -163,6 +166,10 @@ def resolve_model_name(value: str) -> str:
     lowered = model.lower()
     normalized = re.sub(r"[\s_]+", "-", lowered)
     return MODEL_ALIASES.get(lowered, MODEL_ALIASES.get(normalized, model))
+
+
+def model_requires_thinking(model: str) -> bool:
+    return resolve_model_name(model) == "deepseek-v4-pro"
 
 
 def parse_optional_int(value: str) -> Optional[int]:
@@ -288,7 +295,20 @@ def stream_answer(
     answer_parts: List[str] = []
     reasoning_started = False
     reasoning_closed = False
+    status_visible = False
+    status_started_at = time.monotonic()
+    last_status_at = 0.0
     usage: Optional[Dict[str, Any]] = None
+    thinking_output = "raw" if settings.show_thinking else settings.thinking_output
+    show_raw_thinking = thinking_output == "raw"
+    show_thinking_status = thinking_output == "status" and sys.stdout.isatty()
+
+    def clear_thinking_status() -> None:
+        nonlocal status_visible
+        if status_visible:
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
+            status_visible = False
 
     for event in open_stream(settings, api_key, messages):
         if event.get("usage"):
@@ -301,14 +321,23 @@ def stream_answer(
         reasoning = delta.get("reasoning_content") or ""
         content = delta.get("content") or ""
 
-        if reasoning and settings.show_thinking:
+        if reasoning and show_raw_thinking:
             if not reasoning_started:
                 reasoning_started = True
                 sys.stdout.write(terminal.dim("<think>\n"))
             sys.stdout.write(terminal.dim(reasoning))
             sys.stdout.flush()
+        elif reasoning and show_thinking_status:
+            now = time.monotonic()
+            if not status_visible or now - last_status_at >= 0.25:
+                elapsed = int(now - status_started_at)
+                sys.stdout.write("\r\033[2K" + terminal.dim(f"thinking... {elapsed}s"))
+                sys.stdout.flush()
+                status_visible = True
+                last_status_at = now
 
         if content:
+            clear_thinking_status()
             if reasoning_started and not reasoning_closed:
                 reasoning_closed = True
                 sys.stdout.write(terminal.dim("\n</think>\n"))
@@ -316,6 +345,7 @@ def stream_answer(
             sys.stdout.write(content)
             sys.stdout.flush()
 
+    clear_thinking_status()
     if reasoning_started and not reasoning_closed:
         sys.stdout.write(terminal.dim("\n</think>\n"))
     sys.stdout.write("\n")
@@ -328,7 +358,8 @@ def print_banner(state: ChatState, terminal: Terminal) -> None:
     print(
         terminal.dim(
             f"model={state.settings.model} thinking={state.settings.thinking} "
-            f"effort={state.settings.reasoning_effort}"
+            f"effort={state.settings.reasoning_effort} "
+            f"thinking_output={'raw' if state.settings.show_thinking else state.settings.thinking_output}"
         )
     )
 
@@ -345,7 +376,9 @@ def help_text() -> str:
           /set system <text>          Set system prompt
           /set thinking enabled|disabled
           /set effort high|max        Set reasoning effort when thinking is enabled
-          /set show_thinking on|off   Print or hide reasoning_content while streaming
+          /set thinking_output status|hidden|raw
+          /set show_thinking on|off   Compatibility alias for thinking_output
+          /think [status|hidden|raw]  Show or set thinking output display
           /set max_tokens <n|null>
           /set temperature <n|null>   Sent only when thinking=disabled
           /set top_p <n|null>         Sent only when thinking=disabled
@@ -366,7 +399,7 @@ def show_state(state: ChatState, usage: Optional[Dict[str, Any]] = None) -> None
         ("base_url", settings.base_url),
         ("thinking", settings.thinking),
         ("reasoning_effort", settings.reasoning_effort),
-        ("show_thinking", str(settings.show_thinking).lower()),
+        ("thinking_output", "raw" if settings.show_thinking else settings.thinking_output),
         ("max_tokens", str(settings.max_tokens)),
         ("temperature", str(settings.temperature)),
         ("top_p", str(settings.top_p)),
@@ -387,13 +420,15 @@ def handle_set(state: ChatState, args: List[str]) -> None:
     settings = state.settings
 
     if name == "model":
-        settings.model = resolve_model_name(value)
+        apply_model_settings(settings, value)
     elif name == "system":
         settings.system = value
     elif name == "thinking":
         lowered = value.lower()
         if lowered not in SUPPORTED_THINKING:
             raise CliError("thinking 只能是 enabled 或 disabled")
+        if lowered == "disabled" and model_requires_thinking(settings.model):
+            raise CliError("deepseek-v4-pro requires thinking=enabled")
         settings.thinking = lowered
     elif name in {"effort", "reasoning_effort"}:
         lowered = value.lower()
@@ -402,6 +437,13 @@ def handle_set(state: ChatState, args: List[str]) -> None:
         settings.reasoning_effort = lowered
     elif name == "show_thinking":
         settings.show_thinking = parse_bool(value)
+        settings.thinking_output = "raw" if settings.show_thinking else "status"
+    elif name == "thinking_output":
+        lowered = value.lower()
+        if lowered not in SUPPORTED_THINKING_OUTPUT:
+            raise CliError("thinking_output must be status, hidden, or raw")
+        settings.thinking_output = lowered
+        settings.show_thinking = lowered == "raw"
     elif name == "max_tokens":
         settings.max_tokens = parse_optional_int(value)
     elif name == "temperature":
@@ -415,14 +457,35 @@ def handle_set(state: ChatState, args: List[str]) -> None:
     print(f"set {name}")
 
 
+def apply_model_settings(settings: Settings, value: str) -> None:
+    settings.model = resolve_model_name(value)
+    if model_requires_thinking(settings.model):
+        settings.thinking = "enabled"
+
+
 def handle_model(state: ChatState, args: List[str]) -> None:
     if not args:
         print(state.settings.model)
         return
     if len(args) != 1:
         raise CliError("用法: /model [flash|pro|model-name]")
-    state.settings.model = resolve_model_name(args[0])
-    print(f"model {state.settings.model}")
+    apply_model_settings(state.settings, args[0])
+    suffix = " (thinking enabled)" if model_requires_thinking(state.settings.model) else ""
+    print(f"model {state.settings.model}{suffix}")
+
+
+def handle_think(state: ChatState, args: List[str]) -> None:
+    if not args:
+        print("raw" if state.settings.show_thinking else state.settings.thinking_output)
+        return
+    if len(args) != 1:
+        raise CliError("Usage: /think [status|hidden|raw]")
+    value = args[0].lower()
+    if value not in SUPPORTED_THINKING_OUTPUT:
+        raise CliError("thinking output must be status, hidden, or raw")
+    state.settings.thinking_output = value
+    state.settings.show_thinking = value == "raw"
+    print(f"thinking_output {value}")
 
 
 def save_session(state: ChatState, name: str) -> None:
@@ -444,6 +507,11 @@ def load_session(state: ChatState, name: str) -> None:
     for key, value in settings_data.items():
         if hasattr(state.settings, key):
             setattr(state.settings, key, value)
+    state.settings.model = resolve_model_name(state.settings.model)
+    if state.settings.thinking_output not in SUPPORTED_THINKING_OUTPUT:
+        state.settings.thinking_output = "status"
+    if model_requires_thinking(state.settings.model):
+        state.settings.thinking = "enabled"
     state.messages = list(payload.get("messages", []))
     print(f"loaded {path}")
 
@@ -481,6 +549,8 @@ def handle_command(state: ChatState, line: str, last_usage: Optional[Dict[str, A
         show_state(state, last_usage)
     elif command == "model":
         handle_model(state, args)
+    elif command == "think":
+        handle_think(state, args)
     elif command == "set":
         handle_set(state, args)
     elif command == "save":
@@ -599,7 +669,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--top-p", type=float)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--show-thinking", action="store_true", help="print reasoning_content while streaming")
+    parser.add_argument("--thinking-output", choices=sorted(SUPPORTED_THINKING_OUTPUT), default=os.environ.get("DEEPSEEK_THINKING_OUTPUT", "status"))
+    parser.add_argument("--show-thinking", action="store_true", help="compatibility alias for --thinking-output raw")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-banner", action="store_true")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} 0.1")
@@ -609,6 +680,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.thinking_output not in SUPPORTED_THINKING_OUTPUT:
+        parser.error("DEEPSEEK_THINKING_OUTPUT must be status, hidden, or raw")
 
     settings = Settings(
         base_url=args.base_url,
@@ -621,8 +694,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         top_p=args.top_p,
         timeout=args.timeout,
         show_thinking=args.show_thinking,
+        thinking_output="raw" if args.show_thinking else args.thinking_output,
         color=not args.no_color,
     )
+    if model_requires_thinking(settings.model):
+        settings.thinking = "enabled"
     state = ChatState(settings=settings)
     terminal = Terminal(settings.color)
 

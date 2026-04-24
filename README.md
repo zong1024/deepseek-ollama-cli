@@ -6,7 +6,7 @@
 
 - 默认调用官方 OpenAI 兼容接口：`https://api.deepseek.com/chat/completions`
 - 默认模型：`deepseek-v4-flash`
-- 支持 `thinking` 开关与 `reasoning_effort`
+- 支持 `thinking` 开关、`reasoning_effort` 和干净的思考状态显示
 - 无第三方 Python 依赖，适合 Linux 服务器直接使用
 - 自动读取 `DEEPSEEK_API_KEY`
 - 支持保存和加载本地会话
@@ -60,6 +60,8 @@ dsrun --model flash
 >>> /model pro
 ```
 
+`pro` 会自动保持 `thinking=enabled`。
+
 切回 Flash：
 
 ```text
@@ -72,10 +74,18 @@ dsrun --model flash
 dsrun --thinking disabled
 ```
 
-显示 reasoning 内容：
+Pro 会默认使用 thinking。CLI 默认只显示一行干净的 `thinking...` 状态，不会把长思考过程混在最终答案里。
+
+隐藏思考状态：
 
 ```sh
-dsrun --show-thinking
+dsrun --thinking-output hidden
+```
+
+调试时显示原始 reasoning 内容：
+
+```sh
+dsrun --thinking-output raw
 ```
 
 ## 交互命令
@@ -89,7 +99,9 @@ dsrun --show-thinking
 /set system <text>          设置 system prompt
 /set thinking enabled|disabled
 /set effort high|max
-/set show_thinking on|off
+/think [status|hidden|raw]  显示或设置思考输出方式
+/set thinking_output status|hidden|raw
+/set show_thinking on|off   兼容旧用法，on 等同 raw
 /set max_tokens <n|null>
 /set temperature <n|null>   只在 thinking=disabled 时发送
 /set top_p <n|null>         只在 thinking=disabled 时发送
@@ -115,6 +127,7 @@ dsrun --show-thinking
 - `DEEPSEEK_SYSTEM`：默认 system prompt
 - `DEEPSEEK_THINKING`：`enabled` 或 `disabled`
 - `DEEPSEEK_REASONING_EFFORT`：`high` 或 `max`
+- `DEEPSEEK_THINKING_OUTPUT`：`status`、`hidden` 或 `raw`
 
 本地会话保存到：
 
