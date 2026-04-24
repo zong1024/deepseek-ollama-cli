@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+"""
+DeepSeek Ollama-style CLI.
+
+This is intentionally dependency-free so it can run on a minimal Linux host
+with only Python 3 installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import sys
+import textwrap
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+try:
+    import readline  # type: ignore
+except Exception:  # pragma: no cover - readline is optional on some systems.
+    readline = None  # type: ignore
+
+
+APP_NAME = "dsrun"
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-flash"
+SUPPORTED_THINKING = {"enabled", "disabled"}
+SUPPORTED_EFFORT = {"high", "max"}
+
+
+class CliError(Exception):
+    pass
+
+
+class ApiError(Exception):
+    pass
+
+
+@dataclass
+class Settings:
+    base_url: str = DEFAULT_BASE_URL
+    model: str = DEFAULT_MODEL
+    system: str = ""
+    thinking: str = "enabled"
+    reasoning_effort: str = "high"
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    timeout: int = 300
+    show_thinking: bool = False
+    color: bool = True
+
+
+@dataclass
+class ChatState:
+    settings: Settings
+    messages: List[Dict[str, str]] = field(default_factory=list)
+
+    def request_messages(self, user_text: str) -> List[Dict[str, str]]:
+        messages: List[Dict[str, str]] = []
+        if self.settings.system:
+            messages.append({"role": "system", "content": self.settings.system})
+        messages.extend(self.messages)
+        messages.append({"role": "user", "content": user_text})
+        return messages
+
+    def commit_turn(self, user_text: str, assistant_text: str) -> None:
+        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append({"role": "assistant", "content": assistant_text})
+
+    def clear(self) -> None:
+        self.messages.clear()
+
+
+class Terminal:
+    def __init__(self, color: bool) -> None:
+        self.color = color and sys.stdout.isatty()
+
+    def style(self, text: str, code: str) -> str:
+        if not self.color:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def dim(self, text: str) -> str:
+        return self.style(text, "2")
+
+    def cyan(self, text: str) -> str:
+        return self.style(text, "36")
+
+    def yellow(self, text: str) -> str:
+        return self.style(text, "33")
+
+    def red(self, text: str) -> str:
+        return self.style(text, "31")
+
+
+def data_home() -> Path:
+    root = os.environ.get("XDG_DATA_HOME")
+    if root:
+        return Path(root) / APP_NAME
+    return Path.home() / ".local" / "share" / APP_NAME
+
+
+def ensure_dirs() -> Path:
+    root = data_home()
+    (root / "sessions").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def setup_readline(history_file: Path) -> None:
+    if readline is None or not sys.stdin.isatty():
+        return
+    try:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        if history_file.exists():
+            readline.read_history_file(str(history_file))
+        readline.set_history_length(1000)
+    except Exception:
+        pass
+
+
+def save_readline(history_file: Path) -> None:
+    if readline is None or not sys.stdin.isatty():
+        return
+    try:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        readline.write_history_file(str(history_file))
+    except Exception:
+        pass
+
+
+def parse_bool(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if lowered in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise CliError(f"无法识别布尔值: {value}")
+
+
+def parse_optional_int(value: str) -> Optional[int]:
+    if value.lower() in {"none", "null", "off", "unset"}:
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise CliError("max_tokens 必须是正整数")
+    return parsed
+
+
+def parse_optional_float(value: str, name: str, low: float, high: float) -> Optional[float]:
+    if value.lower() in {"none", "null", "off", "unset"}:
+        return None
+    parsed = float(value)
+    if not (low <= parsed <= high):
+        raise CliError(f"{name} 必须在 {low} 到 {high} 之间")
+    return parsed
+
+
+def safe_session_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise CliError("会话名不能为空")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise CliError("会话名只能包含字母、数字、点、下划线和短横线")
+    return name
+
+
+def session_path(name: str) -> Path:
+    return ensure_dirs() / "sessions" / f"{safe_session_name(name)}.json"
+
+
+def build_payload(settings: Settings, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": settings.model,
+        "messages": messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if settings.thinking in SUPPORTED_THINKING:
+        payload["thinking"] = {"type": settings.thinking}
+    if settings.thinking == "enabled":
+        payload["reasoning_effort"] = settings.reasoning_effort
+    if settings.max_tokens is not None:
+        payload["max_tokens"] = settings.max_tokens
+
+    # DeepSeek thinking mode ignores sampling parameters. Only send them when
+    # the user explicitly disables thinking mode, so /show reflects reality.
+    if settings.thinking == "disabled":
+        if settings.temperature is not None:
+            payload["temperature"] = settings.temperature
+        if settings.top_p is not None:
+            payload["top_p"] = settings.top_p
+    return payload
+
+
+def api_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/chat/completions"
+
+
+def format_api_error(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    if body:
+        try:
+            parsed = json.loads(body)
+            message = parsed.get("error", {}).get("message") or parsed.get("message")
+            if message:
+                return f"HTTP {exc.code}: {message}"
+        except Exception:
+            pass
+        compact = body.strip().replace("\n", " ")
+        return f"HTTP {exc.code}: {compact[:600]}"
+    return f"HTTP {exc.code}: {exc.reason}"
+
+
+def open_stream(settings: Settings, api_key: str, messages: List[Dict[str, str]]) -> Iterable[Dict[str, Any]]:
+    payload = build_payload(settings, messages)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        api_url(settings.base_url),
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": f"{APP_NAME}/0.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings.timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data_line = line[5:].strip()
+                if data_line == "[DONE]":
+                    break
+                try:
+                    yield json.loads(data_line)
+                except json.JSONDecodeError:
+                    continue
+    except urllib.error.HTTPError as exc:
+        raise ApiError(format_api_error(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise ApiError(f"网络错误: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ApiError("请求超时") from exc
+
+
+def stream_answer(
+    settings: Settings,
+    api_key: str,
+    messages: List[Dict[str, str]],
+    terminal: Terminal,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    answer_parts: List[str] = []
+    reasoning_started = False
+    reasoning_closed = False
+    usage: Optional[Dict[str, Any]] = None
+
+    for event in open_stream(settings, api_key, messages):
+        if event.get("usage"):
+            usage = event["usage"]
+
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning_content") or ""
+        content = delta.get("content") or ""
+
+        if reasoning and settings.show_thinking:
+            if not reasoning_started:
+                reasoning_started = True
+                sys.stdout.write(terminal.dim("<think>\n"))
+            sys.stdout.write(terminal.dim(reasoning))
+            sys.stdout.flush()
+
+        if content:
+            if reasoning_started and not reasoning_closed:
+                reasoning_closed = True
+                sys.stdout.write(terminal.dim("\n</think>\n"))
+            answer_parts.append(content)
+            sys.stdout.write(content)
+            sys.stdout.flush()
+
+    if reasoning_started and not reasoning_closed:
+        sys.stdout.write(terminal.dim("\n</think>\n"))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return "".join(answer_parts), usage
+
+
+def print_banner(state: ChatState, terminal: Terminal) -> None:
+    print(terminal.cyan("DeepSeek CLI") + "  " + terminal.dim("Ollama-style chat, /? for help"))
+    print(
+        terminal.dim(
+            f"model={state.settings.model} thinking={state.settings.thinking} "
+            f"effort={state.settings.reasoning_effort}"
+        )
+    )
+
+
+def help_text() -> str:
+    return textwrap.dedent(
+        """
+        Available Commands:
+          /? or /help                 Show this help
+          /bye or /exit               Exit
+          /clear or /reset            Clear conversation context
+          /show                       Show current model, settings and context size
+          /set model <name>           Set model, e.g. deepseek-v4-flash
+          /set system <text>          Set system prompt
+          /set thinking enabled|disabled
+          /set effort high|max        Set reasoning effort when thinking is enabled
+          /set show_thinking on|off   Print or hide reasoning_content while streaming
+          /set max_tokens <n|null>
+          /set temperature <n|null>   Sent only when thinking=disabled
+          /set top_p <n|null>         Sent only when thinking=disabled
+          /save <name>                Save current session
+          /load <name>                Load a saved session
+          /sessions                   List saved sessions
+
+        Multiline:
+          Start a message with triple quotes and end with a line containing triple quotes.
+        """
+    ).strip()
+
+
+def show_state(state: ChatState, usage: Optional[Dict[str, Any]] = None) -> None:
+    settings = state.settings
+    rows = [
+        ("model", settings.model),
+        ("base_url", settings.base_url),
+        ("thinking", settings.thinking),
+        ("reasoning_effort", settings.reasoning_effort),
+        ("show_thinking", str(settings.show_thinking).lower()),
+        ("max_tokens", str(settings.max_tokens)),
+        ("temperature", str(settings.temperature)),
+        ("top_p", str(settings.top_p)),
+        ("messages", str(len(state.messages))),
+        ("system", settings.system if settings.system else "(empty)"),
+    ]
+    for key, value in rows:
+        print(f"{key:16} {value}")
+    if usage:
+        print("last_usage       " + json.dumps(usage, ensure_ascii=False))
+
+
+def handle_set(state: ChatState, args: List[str]) -> None:
+    if len(args) < 2:
+        raise CliError("用法: /set <name> <value>")
+    name = args[0].lower()
+    value = " ".join(args[1:])
+    settings = state.settings
+
+    if name == "model":
+        settings.model = value.strip()
+    elif name == "system":
+        settings.system = value
+    elif name == "thinking":
+        lowered = value.lower()
+        if lowered not in SUPPORTED_THINKING:
+            raise CliError("thinking 只能是 enabled 或 disabled")
+        settings.thinking = lowered
+    elif name in {"effort", "reasoning_effort"}:
+        lowered = value.lower()
+        if lowered not in SUPPORTED_EFFORT:
+            raise CliError("effort 只能是 high 或 max")
+        settings.reasoning_effort = lowered
+    elif name == "show_thinking":
+        settings.show_thinking = parse_bool(value)
+    elif name == "max_tokens":
+        settings.max_tokens = parse_optional_int(value)
+    elif name == "temperature":
+        settings.temperature = parse_optional_float(value, "temperature", 0.0, 2.0)
+    elif name == "top_p":
+        settings.top_p = parse_optional_float(value, "top_p", 0.0, 1.0)
+    elif name == "base_url":
+        settings.base_url = value.strip()
+    else:
+        raise CliError(f"未知设置项: {name}")
+    print(f"set {name}")
+
+
+def save_session(state: ChatState, name: str) -> None:
+    path = session_path(name)
+    payload = {
+        "settings": state.settings.__dict__,
+        "messages": state.messages,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"saved {path}")
+
+
+def load_session(state: ChatState, name: str) -> None:
+    path = session_path(name)
+    if not path.exists():
+        raise CliError(f"找不到会话: {name}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    settings_data = payload.get("settings", {})
+    for key, value in settings_data.items():
+        if hasattr(state.settings, key):
+            setattr(state.settings, key, value)
+    state.messages = list(payload.get("messages", []))
+    print(f"loaded {path}")
+
+
+def list_sessions() -> None:
+    sessions_dir = ensure_dirs() / "sessions"
+    sessions = sorted(path.stem for path in sessions_dir.glob("*.json"))
+    if not sessions:
+        print("(no sessions)")
+        return
+    for name in sessions:
+        print(name)
+
+
+def parse_command(line: str) -> Tuple[str, List[str]]:
+    try:
+        parts = shlex.split(line)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    if not parts:
+        return "", []
+    return parts[0][1:].lower(), parts[1:]
+
+
+def handle_command(state: ChatState, line: str, last_usage: Optional[Dict[str, Any]]) -> bool:
+    command, args = parse_command(line)
+    if command in {"?", "help"}:
+        print(help_text())
+    elif command in {"bye", "exit", "quit"}:
+        return False
+    elif command in {"clear", "reset"}:
+        state.clear()
+        print("context cleared")
+    elif command == "show":
+        show_state(state, last_usage)
+    elif command == "set":
+        handle_set(state, args)
+    elif command == "save":
+        if len(args) != 1:
+            raise CliError("用法: /save <name>")
+        save_session(state, args[0])
+    elif command == "load":
+        if len(args) != 1:
+            raise CliError("用法: /load <name>")
+        load_session(state, args[0])
+    elif command == "sessions":
+        list_sessions()
+    elif command == "":
+        pass
+    else:
+        raise CliError(f"未知命令: /{command}，输入 /? 查看帮助")
+    return True
+
+
+def read_user_message() -> Optional[str]:
+    try:
+        line = input(">>> ")
+    except EOFError:
+        return None
+    except KeyboardInterrupt:
+        print()
+        return ""
+
+    if not line.startswith('"""'):
+        return line.strip()
+
+    first = line[3:]
+    if first.endswith('"""') and len(first) > 3:
+        return first[:-3]
+
+    lines = [first] if first else []
+    while True:
+        try:
+            next_line = input("... ")
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print()
+            return ""
+        if next_line == '"""':
+            break
+        lines.append(next_line)
+    return "\n".join(lines).strip()
+
+
+def require_api_key(args: argparse.Namespace) -> str:
+    api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise CliError("缺少 API key。请设置 DEEPSEEK_API_KEY 或使用 --api-key。")
+    return api_key
+
+
+def run_turn(state: ChatState, api_key: str, user_text: str, terminal: Terminal) -> Optional[Dict[str, Any]]:
+    messages = state.request_messages(user_text)
+    answer, usage = stream_answer(state.settings, api_key, messages, terminal)
+    state.commit_turn(user_text, answer)
+    return usage
+
+
+def interactive(state: ChatState, api_key: str, no_banner: bool) -> int:
+    root = ensure_dirs()
+    history_file = root / "readline_history"
+    setup_readline(history_file)
+    terminal = Terminal(state.settings.color)
+    last_usage: Optional[Dict[str, Any]] = None
+
+    if not no_banner:
+        print_banner(state, terminal)
+
+    try:
+        while True:
+            user_text = read_user_message()
+            if user_text is None:
+                print()
+                break
+            if not user_text:
+                continue
+            if user_text.startswith("/"):
+                try:
+                    keep_going = handle_command(state, user_text, last_usage)
+                except CliError as exc:
+                    print(terminal.red(f"error: {exc}"))
+                    continue
+                if not keep_going:
+                    break
+                continue
+            try:
+                last_usage = run_turn(state, api_key, user_text, terminal)
+            except KeyboardInterrupt:
+                print("\ninterrupted")
+            except ApiError as exc:
+                print(terminal.red(f"api error: {exc}"))
+    finally:
+        save_readline(history_file)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=APP_NAME,
+        description="Ollama-style CLI for the official DeepSeek chat completions API.",
+    )
+    parser.add_argument("prompt", nargs="*", help="optional one-shot prompt")
+    parser.add_argument("--api-key", help="DeepSeek API key; defaults to DEEPSEEK_API_KEY")
+    parser.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--system", default=os.environ.get("DEEPSEEK_SYSTEM", ""))
+    parser.add_argument("--thinking", choices=sorted(SUPPORTED_THINKING), default=os.environ.get("DEEPSEEK_THINKING", "enabled"))
+    parser.add_argument("--reasoning-effort", choices=sorted(SUPPORTED_EFFORT), default=os.environ.get("DEEPSEEK_REASONING_EFFORT", "high"))
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--show-thinking", action="store_true", help="print reasoning_content while streaming")
+    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument("--no-banner", action="store_true")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} 0.1")
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    settings = Settings(
+        base_url=args.base_url,
+        model=args.model,
+        system=args.system,
+        thinking=args.thinking,
+        reasoning_effort=args.reasoning_effort,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        timeout=args.timeout,
+        show_thinking=args.show_thinking,
+        color=not args.no_color,
+    )
+    state = ChatState(settings=settings)
+    terminal = Terminal(settings.color)
+
+    try:
+        api_key = require_api_key(args)
+        if args.prompt:
+            user_text = " ".join(args.prompt).strip()
+            if not user_text:
+                return 0
+            run_turn(state, api_key, user_text, terminal)
+            return 0
+        return interactive(state, api_key, args.no_banner)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except ApiError as exc:
+        print(f"api error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
