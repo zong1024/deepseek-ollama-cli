@@ -46,6 +46,14 @@ MODEL_ALIASES = {
 SUPPORTED_THINKING = {"enabled", "disabled"}
 SUPPORTED_EFFORT = {"high", "max"}
 SUPPORTED_THINKING_OUTPUT = {"status", "hidden", "raw"}
+SUPPORTED_RESPONSE_FORMATS = {"plain", "markdown"}
+PLAIN_TERMINAL_SYSTEM = (
+    "Write for a plain terminal, not a rendered Markdown page. "
+    "Do not use Markdown tables. Avoid display LaTeX blocks and heavy Markdown formatting. "
+    "For math, use compact plain-text formulas and short numbered steps. "
+    "End with a clear final answer line. "
+    "If the user explicitly asks for Markdown, follow the user's request."
+)
 
 
 class CliError(Exception):
@@ -69,6 +77,7 @@ class Settings:
     timeout: int = 300
     show_thinking: bool = False
     thinking_output: str = "status"
+    response_format: str = "plain"
     color: bool = True
 
 
@@ -79,8 +88,14 @@ class ChatState:
 
     def request_messages(self, user_text: str) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
+        system_parts = []
+        style_prompt = response_style_prompt(self.settings)
+        if style_prompt:
+            system_parts.append(style_prompt)
         if self.settings.system:
-            messages.append({"role": "system", "content": self.settings.system})
+            system_parts.append(self.settings.system)
+        if system_parts:
+            messages.append({"role": "system", "content": "\n\n".join(system_parts)})
         messages.extend(self.messages)
         messages.append({"role": "user", "content": user_text})
         return messages
@@ -170,6 +185,12 @@ def resolve_model_name(value: str) -> str:
 
 def model_requires_thinking(model: str) -> bool:
     return resolve_model_name(model) == "deepseek-v4-pro"
+
+
+def response_style_prompt(settings: Settings) -> str:
+    if settings.response_format == "plain":
+        return PLAIN_TERMINAL_SYSTEM
+    return ""
 
 
 def parse_optional_int(value: str) -> Optional[int]:
@@ -359,7 +380,8 @@ def print_banner(state: ChatState, terminal: Terminal) -> None:
         terminal.dim(
             f"model={state.settings.model} thinking={state.settings.thinking} "
             f"effort={state.settings.reasoning_effort} "
-            f"thinking_output={'raw' if state.settings.show_thinking else state.settings.thinking_output}"
+            f"thinking_output={'raw' if state.settings.show_thinking else state.settings.thinking_output} "
+            f"format={state.settings.response_format}"
         )
     )
 
@@ -373,6 +395,7 @@ def help_text() -> str:
           /clear or /reset            Clear conversation context
           /show                       Show current model, settings and context size
           /model [name]               Show or set model; aliases: flash, pro
+          /format [plain|markdown]    Show or set answer format
           /paste                      Paste a multiline prompt; end with /send
           /set system <text>          Set system prompt
           /set thinking enabled|disabled
@@ -401,6 +424,7 @@ def show_state(state: ChatState, usage: Optional[Dict[str, Any]] = None) -> None
         ("thinking", settings.thinking),
         ("reasoning_effort", settings.reasoning_effort),
         ("thinking_output", "raw" if settings.show_thinking else settings.thinking_output),
+        ("format", settings.response_format),
         ("max_tokens", str(settings.max_tokens)),
         ("temperature", str(settings.temperature)),
         ("top_p", str(settings.top_p)),
@@ -445,6 +469,8 @@ def handle_set(state: ChatState, args: List[str]) -> None:
             raise CliError("thinking_output must be status, hidden, or raw")
         settings.thinking_output = lowered
         settings.show_thinking = lowered == "raw"
+    elif name in {"format", "response_format"}:
+        apply_response_format(settings, value)
     elif name == "max_tokens":
         settings.max_tokens = parse_optional_int(value)
     elif name == "temperature":
@@ -464,6 +490,13 @@ def apply_model_settings(settings: Settings, value: str) -> None:
         settings.thinking = "enabled"
 
 
+def apply_response_format(settings: Settings, value: str) -> None:
+    response_format = value.strip().lower()
+    if response_format not in SUPPORTED_RESPONSE_FORMATS:
+        raise CliError("format must be plain or markdown")
+    settings.response_format = response_format
+
+
 def handle_model(state: ChatState, args: List[str]) -> None:
     if not args:
         print(state.settings.model)
@@ -473,6 +506,16 @@ def handle_model(state: ChatState, args: List[str]) -> None:
     apply_model_settings(state.settings, args[0])
     suffix = " (thinking enabled)" if model_requires_thinking(state.settings.model) else ""
     print(f"model {state.settings.model}{suffix}")
+
+
+def handle_format(state: ChatState, args: List[str]) -> None:
+    if not args:
+        print(state.settings.response_format)
+        return
+    if len(args) != 1:
+        raise CliError("Usage: /format [plain|markdown]")
+    apply_response_format(state.settings, args[0])
+    print(f"format {state.settings.response_format}")
 
 
 def handle_think(state: ChatState, args: List[str]) -> None:
@@ -511,6 +554,8 @@ def load_session(state: ChatState, name: str) -> None:
     state.settings.model = resolve_model_name(state.settings.model)
     if state.settings.thinking_output not in SUPPORTED_THINKING_OUTPUT:
         state.settings.thinking_output = "status"
+    if state.settings.response_format not in SUPPORTED_RESPONSE_FORMATS:
+        state.settings.response_format = "plain"
     if model_requires_thinking(state.settings.model):
         state.settings.thinking = "enabled"
     state.messages = list(payload.get("messages", []))
@@ -550,6 +595,8 @@ def handle_command(state: ChatState, line: str, last_usage: Optional[Dict[str, A
         show_state(state, last_usage)
     elif command == "model":
         handle_model(state, args)
+    elif command == "format":
+        handle_format(state, args)
     elif command == "think":
         handle_think(state, args)
     elif command == "set":
@@ -704,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--thinking-output", choices=sorted(SUPPORTED_THINKING_OUTPUT), default=os.environ.get("DEEPSEEK_THINKING_OUTPUT", "status"))
+    parser.add_argument("--format", choices=sorted(SUPPORTED_RESPONSE_FORMATS), default=os.environ.get("DEEPSEEK_FORMAT", "plain"), dest="response_format")
     parser.add_argument("--show-thinking", action="store_true", help="compatibility alias for --thinking-output raw")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-banner", action="store_true")
@@ -716,6 +764,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.thinking_output not in SUPPORTED_THINKING_OUTPUT:
         parser.error("DEEPSEEK_THINKING_OUTPUT must be status, hidden, or raw")
+    if args.response_format not in SUPPORTED_RESPONSE_FORMATS:
+        parser.error("DEEPSEEK_FORMAT must be plain or markdown")
 
     settings = Settings(
         base_url=args.base_url,
@@ -729,6 +779,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         timeout=args.timeout,
         show_thinking=args.show_thinking,
         thinking_output="raw" if args.show_thinking else args.thinking_output,
+        response_format=args.response_format,
         color=not args.no_color,
     )
     if model_requires_thinking(settings.model):

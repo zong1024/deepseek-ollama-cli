@@ -7,6 +7,7 @@
 - 默认调用官方 OpenAI 兼容接口：`https://api.deepseek.com/chat/completions`
 - 默认模型：`deepseek-v4-flash`
 - 支持 `thinking` 开关、`reasoning_effort` 和干净的思考状态显示
+- 默认使用适合终端的纯文本回答格式，避免 Markdown 表格和大段 LaTeX
 - 无第三方 Python 依赖，适合 Linux 服务器直接使用
 - 自动读取 `DEEPSEEK_API_KEY`
 - 支持保存和加载本地会话
@@ -101,6 +102,18 @@ dsrun --thinking-output hidden
 dsrun --thinking-output raw
 ```
 
+默认回答格式是 `plain`，适合普通终端显示。切换为 Markdown：
+
+```text
+>>> /format markdown
+```
+
+切回终端纯文本：
+
+```text
+>>> /format plain
+```
+
 ## 交互命令
 
 ```text
@@ -109,6 +122,7 @@ dsrun --thinking-output raw
 /clear or /reset            清空当前上下文
 /show                       显示当前设置
 /model [name]               显示或设置模型，支持 flash、pro
+/format [plain|markdown]    显示或设置回答格式
 /paste                      粘贴多行 prompt，用 /send 发送
 /set system <text>          设置 system prompt
 /set thinking enabled|disabled
@@ -157,6 +171,7 @@ paste> /send
 - `DEEPSEEK_THINKING`：`enabled` 或 `disabled`
 - `DEEPSEEK_REASONING_EFFORT`：`high` 或 `max`
 - `DEEPSEEK_THINKING_OUTPUT`：`status`、`hidden` 或 `raw`
+- `DEEPSEEK_FORMAT`：`plain` 或 `markdown`
 
 本地会话保存到：
 
