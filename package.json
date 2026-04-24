@@ -1,0 +1,31 @@
+{
+  "name": "deepseek-ollama-cli",
+  "version": "0.1.0",
+  "description": "Ollama-style CLI for the official DeepSeek chat completions API.",
+  "bin": {
+    "dsrun": "./bin/dsrun.js"
+  },
+  "files": [
+    "bin/dsrun.js",
+    "dsrun",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek",
+    "cli",
+    "ollama",
+    "chat",
+    "terminal"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zong1024/deepseek-ollama-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zong1024/deepseek-ollama-cli/issues"
+  },
+  "homepage": "https://github.com/zong1024/deepseek-ollama-cli#readme",
+  "license": "MIT"
+}

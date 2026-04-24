@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - readline is optional on some systems.
 
 
 APP_NAME = "dsrun"
+APP_VERSION = "0.1.0"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 MODEL_ALIASES = {
@@ -755,7 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--show-thinking", action="store_true", help="compatibility alias for --thinking-output raw")
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--no-banner", action="store_true")
-    parser.add_argument("--version", action="version", version=f"{APP_NAME} 0.1")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     return parser
 
 

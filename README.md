@@ -14,6 +14,34 @@
 
 ## 安装
 
+推荐使用 npm 全局安装，后续升级也方便：
+
+```sh
+npm install -g deepseek-ollama-cli
+```
+
+需要系统里有 Python 3。npm 安装会提供 `dsrun` 命令，实际运行时自动调用 `python3`。
+
+升级：
+
+```sh
+npm install -g deepseek-ollama-cli@latest
+```
+
+如果 npm 包还没有发布，也可以直接从 GitHub 安装：
+
+```sh
+npm install -g github:zong1024/deepseek-ollama-cli
+```
+
+从 GitHub 方式升级：
+
+```sh
+npm install -g github:zong1024/deepseek-ollama-cli#main
+```
+
+源码安装方式仍然可用：
+
 ```sh
 cd deepseek-ollama-cli
 sh install.sh
