@@ -373,6 +373,7 @@ def help_text() -> str:
           /clear or /reset            Clear conversation context
           /show                       Show current model, settings and context size
           /model [name]               Show or set model; aliases: flash, pro
+          /paste                      Paste a multiline prompt; end with /send
           /set system <text>          Set system prompt
           /set thinking enabled|disabled
           /set effort high|max        Set reasoning effort when thinking is enabled
@@ -579,6 +580,9 @@ def read_user_message() -> Optional[str]:
         print()
         return ""
 
+    if line.strip() == "/paste":
+        return read_paste_message()
+
     if not line.startswith('"""'):
         return line.strip()
 
@@ -598,7 +602,27 @@ def read_user_message() -> Optional[str]:
         if next_line == '"""':
             break
         lines.append(next_line)
-    return "\n".join(lines).strip()
+    return "\n".join(lines).rstrip("\n")
+
+
+def read_paste_message() -> str:
+    print("paste mode: end with /send, cancel with /cancel")
+    lines: List[str] = []
+    while True:
+        try:
+            line = input("paste> ")
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print()
+            return ""
+        marker = line.strip()
+        if marker in {"/send", "/end"}:
+            break
+        if marker == "/cancel":
+            return ""
+        lines.append(line)
+    return "\n".join(lines).rstrip("\n")
 
 
 def require_api_key(args: argparse.Namespace) -> str:
@@ -606,6 +630,15 @@ def require_api_key(args: argparse.Namespace) -> str:
     if not api_key:
         raise CliError("缺少 API key。请设置 DEEPSEEK_API_KEY 或使用 --api-key。")
     return api_key
+
+
+def read_file_prompt(path: str) -> str:
+    if path == "-":
+        return sys.stdin.read().rstrip("\n")
+    try:
+        return Path(path).read_text(encoding="utf-8").rstrip("\n")
+    except OSError as exc:
+        raise CliError(f"failed to read prompt file: {exc}") from exc
 
 
 def run_turn(state: ChatState, api_key: str, user_text: str, terminal: Terminal) -> Optional[Dict[str, Any]]:
@@ -659,6 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Ollama-style CLI for the official DeepSeek chat completions API.",
     )
     parser.add_argument("prompt", nargs="*", help="optional one-shot prompt")
+    parser.add_argument("-f", "--file", help="read a one-shot prompt from a UTF-8 file; use - for stdin")
     parser.add_argument("--api-key", help="DeepSeek API key; defaults to DEEPSEEK_API_KEY")
     parser.add_argument("--base-url", default=os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL))
@@ -703,9 +737,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     terminal = Terminal(settings.color)
 
     try:
+        if args.file and args.prompt:
+            raise CliError("use either --file or prompt arguments, not both")
         api_key = require_api_key(args)
-        if args.prompt:
+        one_shot = bool(args.file or args.prompt) or not sys.stdin.isatty()
+        user_text = ""
+        if args.file:
+            user_text = read_file_prompt(args.file)
+        elif args.prompt:
             user_text = " ".join(args.prompt).strip()
+        elif not sys.stdin.isatty():
+            user_text = sys.stdin.read().rstrip("\n")
+        if one_shot:
             if not user_text:
                 return 0
             run_turn(state, api_key, user_text, terminal)

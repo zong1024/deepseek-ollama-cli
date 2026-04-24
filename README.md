@@ -41,6 +41,19 @@ dsrun
 dsrun "用三句话解释 Linux epoll"
 ```
 
+从文件发送长 prompt：
+
+```sh
+dsrun --file prompt.txt
+```
+
+也可以用管道或重定向：
+
+```sh
+cat prompt.txt | dsrun
+dsrun < prompt.txt
+```
+
 切换模型：
 
 ```sh
@@ -96,6 +109,7 @@ dsrun --thinking-output raw
 /clear or /reset            清空当前上下文
 /show                       显示当前设置
 /model [name]               显示或设置模型，支持 flash、pro
+/paste                      粘贴多行 prompt，用 /send 发送
 /set system <text>          设置 system prompt
 /set thinking enabled|disabled
 /set effort high|max
@@ -117,6 +131,21 @@ dsrun --thinking-output raw
 ... 第一行
 ... 第二行
 ... """
+```
+
+更适合整段粘贴题目或代码的是 `/paste`：
+
+```text
+>>> /paste
+paste mode: end with /send, cancel with /cancel
+paste> 请解这道数学题，要求给出关键推导过程，最后给出唯一答案：
+paste>
+paste> 设数列 {a_n} 满足：
+paste> a_0 = 3, a_1 = 17,
+paste> a_n = 8a_{n-1} - 15a_{n-2} + 2^n + n^2, n >= 2。
+paste>
+paste> 求 a_30 除以 100000 的余数。
+paste> /send
 ```
 
 ## 环境变量
